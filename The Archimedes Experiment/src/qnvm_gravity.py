@@ -911,24 +911,45 @@ class QuantumVMGravity(QuantumVM):
             return self._expectation_stabilizer(pauli_string)
 
     def _expectation_statevector(self, pauli_string: str) -> float:
-        """Exact expectation via statevector inner product."""
+        """Exact expectation via applying Pauli gates directly to the statevector.
+
+        Instead of building the full 2^N x 2^N operator matrix (which would
+        require O(4^N) memory), we apply each Pauli gate one qubit at a time
+        to a copy of the statevector and compute <psi|O|psi> = <psi|O_psi>.
+        This keeps memory at O(2^N) throughout.
+        """
         state = self._backend.state
         if state is None:
             raise RuntimeError("Backend not started.")
 
-        # Build Pauli operator as a matrix
-        single_paulis = {
+        pauli_gates = {
             'I': np.eye(2, dtype=complex),
             'X': np.array([[0, 1], [1, 0]], dtype=complex),
             'Y': np.array([[0, -1j], [1j, 0]], dtype=complex),
             'Z': np.array([[1, 0], [0, -1]], dtype=complex),
         }
 
-        op = single_paulis[pauli_string[0]]
-        for i in range(1, self.qubits):
-            op = np.kron(op, single_paulis[pauli_string[i]])
+        # Apply Pauli gates to a copy of the state, one qubit at a time
+        result_state = state.copy()
+        for q, p in enumerate(pauli_string):
+            if p == 'I':
+                continue
+            gate = pauli_gates[p]
+            # Reshape, apply gate to qubit axis, reshape back
+            shape = [2] * self.qubits
+            tensor = result_state.reshape(shape)
+            axes = list(range(self.qubits))
+            axes.remove(q)
+            axes = [q] + axes
+            tensor = np.transpose(tensor, axes)
+            mat = tensor.reshape((2, -1))
+            mat = gate @ mat
+            tensor = mat.reshape([2] + [2] * (self.qubits - 1))
+            inv_axes = np.argsort(axes)
+            tensor = np.transpose(tensor, inv_axes)
+            result_state = tensor.reshape(-1)
 
-        return float(np.real(state.conj() @ op @ state))
+        return float(np.real(np.conj(state) @ result_state))
 
     def _expectation_stabilizer(self, pauli_string: str) -> float:
         """Estimate expectation via stabilizer sampling."""
@@ -940,6 +961,10 @@ class QuantumVMGravity(QuantumVM):
         """
         Return the full density matrix rho = |psi><psi|.
 
+        WARNING: For N qubits this allocates a 2^N x 2^N complex128 matrix.
+        For 16 qubits this requires ~64 GiB. For N > 14, use
+        get_reduced_density_matrix() or expectation() instead.
+
         Only available for statevector backend (qubits <= 20).
         For stabilizer backend, raises ValueError.
         """
@@ -950,11 +975,27 @@ class QuantumVMGravity(QuantumVM):
         state = self._backend.state
         if state is None:
             raise RuntimeError("Backend not started.")
+        dim = 1 << self.qubits
+        mem_gb = (dim * dim * 16) / (1024 ** 3)  # 16 bytes per complex128 element
+        if mem_gb > 8.0:
+            raise MemoryError(
+                f"Full density matrix for {self.qubits} qubits requires ~{mem_gb:.1f} GiB. "
+                f"Use get_reduced_density_matrix(subsystem) instead.")
         return np.outer(state, state.conj())
 
     def get_reduced_density_matrix(self, subsystem: List[int]) -> np.ndarray:
         """
-        Return the reduced density matrix for a subsystem.
+        Return the reduced density matrix for a subsystem, computed directly
+        from the statevector without materializing the full density matrix.
+
+        For a pure state |psi>, the reduced density matrix for subsystem A is:
+            rho_A = Tr_B(|psi><psi|)
+
+        This is computed by reshaping the statevector into a matrix of shape
+        (2^k, 2^(n-k)) where k = len(subsystem), then:
+            rho_A = mat @ mat^dagger
+
+        Memory usage: O(2^k * 2^(n-k)) = O(2^n), same as the statevector.
 
         Parameters
         ----------
@@ -966,9 +1007,37 @@ class QuantumVMGravity(QuantumVM):
         np.ndarray
             Reduced density matrix of shape (2^k, 2^k) where k = len(subsystem).
         """
-        rho = self.get_density_matrix()
-        trace_out = [q for q in range(self.qubits) if q not in subsystem]
-        return partial_trace_fast(rho, trace_out, self.qubits)
+        if self._backend_type != 'statevector':
+            raise ValueError(
+                "Reduced density matrix not available for stabilizer backend. "
+                "Use expectation() with shot-based estimation instead.")
+        state = self._backend.state
+        if state is None:
+            raise RuntimeError("Backend not started.")
+
+        n = self.qubits
+        subsystem_sorted = sorted(subsystem)
+        trace_out = sorted(set(range(n)) - set(subsystem))
+
+        n_keep = len(subsystem_sorted)
+        n_trace = len(trace_out)
+        dim_keep = 1 << n_keep
+        dim_trace = 1 << n_trace
+
+        # Reshape state to tensor (2, 2, ..., 2) with one axis per qubit
+        tensor = state.reshape([2] * n)
+
+        # Transpose so that keep qubits come first, then trace qubits
+        axes_order = subsystem_sorted + trace_out
+        tensor = np.transpose(tensor, axes_order)
+
+        # Reshape to (2^n_keep, 2^n_trace)
+        mat = tensor.reshape(dim_keep, dim_trace)
+
+        # Reduced density matrix: rho_A = mat @ mat^dagger
+        rho_reduced = mat @ mat.conj().T
+
+        return rho_reduced
 
     def von_neumann_entropy_subsystem(self, subsystem: List[int]) -> float:
         """
