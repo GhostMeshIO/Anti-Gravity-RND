@@ -1,0 +1,1 @@
+This is a funded, active, high-precision balance experiment. It asks a simple, profound question: Does vacuum energy weigh something? Regardless of the answer (yes or no), the result will be a Nobel-tier discovery about the nature of gravity.
