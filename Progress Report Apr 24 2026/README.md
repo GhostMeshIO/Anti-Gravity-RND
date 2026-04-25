@@ -3,7 +3,7 @@
 **Date:** April 24, 2026  
 **Repository:** [GhostMeshIO/Anti-Gravity-RND](https://github.com/GhostMeshIO/Anti-Gravity-RND)
 
-This directory contains the consolidated progress report and supporting documentation for the **Archimedes Experiment** – a funded research project investigating whether vacuum energy couples to gravity via high-precision balance measurements on superconducting materials.
+This directory contains the consolidated progress report and supporting documentation for the **Archimedes Experiment** – a research project investigating whether vacuum energy couples to gravity via high-precision balance measurements on superconducting materials.
 
 ## 📁 Contents
 
